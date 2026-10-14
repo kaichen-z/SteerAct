@@ -1,0 +1,87 @@
+{
+  "backbone": "fastwam",
+  "layer": "fastwam_video_L29",
+  "tasks": [
+    "put_bottles_dustbin"
+  ],
+  "paths": {
+    "run_dir": "../artifacts/fastwam_single_task",
+    "robotwin": "../../RoboTwin",
+    "checkpoint": "<path to checkpoint>",
+    "stats": "<path to dataset statistics>",
+    "fastwam": "../../FastWAM",
+    "dit": "hf://Wan-AI/Wan2.2-TI2V-5B",
+    "vae": "hf://Wan-AI/Wan2.2-TI2V-5B/Wan2.2_VAE.pth",
+    "text_encoder": "hf://Wan-AI/Wan2.2-TI2V-5B/models_t5_umt5-xxl-enc-bf16.pth",
+    "tokenizer": "hf://Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl"
+  },
+  "policy": {
+    "setting": "demo_clean",
+    "embodiment": "arx_x5",
+    "replan_steps": 24,
+    "inference_steps": 10
+  },
+  "collection": {
+    "episodes_per_task": 24,
+    "seed_start": 0,
+    "max_attempts": 1000,
+    "tokens_per_decision": 256,
+    "storage_dtype": "float32",
+    "layers": [
+      "fastwam_video_L27",
+      "fastwam_video_L28",
+      "fastwam_video_L29",
+      "fastwam_action_L0",
+      "fastwam_action_L1",
+      "fastwam_action_L2",
+      "fastwam_action_L3",
+      "fastwam_action_L4",
+      "fastwam_action_L5",
+      "fastwam_action_L6",
+      "fastwam_action_L7",
+      "fastwam_action_L8",
+      "fastwam_action_L9",
+      "fastwam_action_L10",
+      "fastwam_action_L11",
+      "fastwam_action_L12",
+      "fastwam_action_L13",
+      "fastwam_action_L14",
+      "fastwam_action_L15",
+      "fastwam_action_L16",
+      "fastwam_action_L17",
+      "fastwam_action_L18",
+      "fastwam_action_L19",
+      "fastwam_action_L20",
+      "fastwam_action_L21",
+      "fastwam_action_L22",
+      "fastwam_action_L23",
+      "fastwam_action_L24",
+      "fastwam_action_L25",
+      "fastwam_action_L26",
+      "fastwam_action_L27",
+      "fastwam_action_L28",
+      "fastwam_action_L29"
+    ],
+    "action_capture": "first_denoising_call"
+  },
+  "sae": {
+    "scope": "single_task",
+    "expansion_ratio": 8,
+    "top_k": 100,
+    "batch_size": 1024,
+    "steps": 15000,
+    "learning_rate": 0.0003,
+    "seed": 42,
+    "log_every": 100
+  },
+  "steering": {
+    "top_k": 4,
+    "controller": {}
+  },
+  "evaluation": {
+    "episodes_per_task": 200,
+    "seed_start": 5000,
+    "max_attempts": 1000,
+    "max_steps_multiplier": 2
+  }
+}

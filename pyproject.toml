@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steeract"
+version = "0.1.0"
+description = "SteerAct experiments for pi0.5 and Fast-WAM on RoboTwin 2.0"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "torch>=2.1", "huggingface_hub>=0.20"]
+
+[project.scripts]
+steeract = "steeract.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["steeract*"]

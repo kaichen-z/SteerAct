@@ -1,0 +1,73 @@
+{
+  "backbone": "pi05",
+  "layer": "paligemma_L17",
+  "tasks": [
+    "put_bottles_dustbin"
+  ],
+  "paths": {
+    "run_dir": "../artifacts/pi05_single_task",
+    "robotwin": "../../RoboTwin",
+    "checkpoint": "<path to checkpoint>",
+    "norm": "<path to checkpoint>/assets/<dataset>"
+  },
+  "policy": {
+    "setting": "demo_clean",
+    "embodiment": "aloha_agilex",
+    "config_name": "pi05_base_aloha_full_sim_arx-x5_seed_0",
+    "action_horizon": 50,
+    "delta_actions": true,
+    "max_steps": 1700,
+    "replan_steps": 0
+  },
+  "collection": {
+    "episodes_per_task": 24,
+    "seed_start": 0,
+    "max_attempts": 1000,
+    "tokens_per_decision": 256,
+    "storage_dtype": "float32",
+    "layers": [
+      "paligemma_L15",
+      "paligemma_L16",
+      "paligemma_L17",
+      "expert_L0",
+      "expert_L1",
+      "expert_L2",
+      "expert_L3",
+      "expert_L4",
+      "expert_L5",
+      "expert_L6",
+      "expert_L7",
+      "expert_L8",
+      "expert_L9",
+      "expert_L10",
+      "expert_L11",
+      "expert_L12",
+      "expert_L13",
+      "expert_L14",
+      "expert_L15",
+      "expert_L16",
+      "expert_L17"
+    ],
+    "action_capture": "first_denoising_call"
+  },
+  "sae": {
+    "scope": "single_task",
+    "expansion_ratio": 8,
+    "top_k": 100,
+    "batch_size": 1024,
+    "steps": 15000,
+    "learning_rate": 0.0003,
+    "seed": 42,
+    "log_every": 100
+  },
+  "steering": {
+    "top_k": 4,
+    "controller": {}
+  },
+  "evaluation": {
+    "episodes_per_task": 200,
+    "seed_start": 5000,
+    "max_attempts": 1000,
+    "max_steps_multiplier": 2
+  }
+}
