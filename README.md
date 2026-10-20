@@ -5,6 +5,7 @@
 
 **One temporal descriptor connects feature selection and online steering.**
 
+[![Paper](https://img.shields.io/badge/arXiv-2610.25632-b31b1b?style=for-the-badge)](https://arxiv.org/pdf/2610.25632)
 [![Project Page](https://img.shields.io/badge/Project-Page-2563eb?style=for-the-badge)](https://steeract.github.io/)
 [![Robot Demos](https://img.shields.io/badge/Robot-Demos-0f766e?style=for-the-badge)](https://steeract.github.io/#real-robots)
 [![Method](https://img.shields.io/badge/Explore-the_Method-475569?style=for-the-badge)](https://steeract.github.io/#method)
@@ -295,7 +296,7 @@ Use **`python -m steeract`** for the workflow documented here. The separate `SAE
 
 ## Citation
 
-If you find SteerAct useful, please cite the project. The entry below uses the project page; no arXiv identifier or publication venue is assumed.
+If you find SteerAct useful, please cite the [paper](https://arxiv.org/pdf/2610.25632).
 
 ```bibtex
 @misc{zhou2026steeract,
@@ -305,7 +306,10 @@ If you find SteerAct useful, please cite the project. The entry below uses the p
              Qianqian Wang and Mac Schwager and Zhuang Liu and Li Fei-Fei and
              Mengyu Wang and Paul Pu Liang},
   year    = {2026},
-  url     = {https://steeract.github.io/}
+  eprint  = {2610.25632},
+  archivePrefix = {arXiv},
+  primaryClass = {cs.RO},
+  url     = {https://arxiv.org/abs/2610.25632}
 }
 ```
 
