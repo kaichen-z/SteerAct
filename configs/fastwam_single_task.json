@@ -22,45 +22,14 @@
     "inference_steps": 10
   },
   "collection": {
-    "episodes_per_task": 24,
+    "episodes_per_task": 96,
     "seed_start": 0,
     "max_attempts": 1000,
     "tokens_per_decision": 256,
     "storage_dtype": "float32",
     "layers": [
-      "fastwam_video_L26",
       "fastwam_video_L27",
-      "fastwam_video_L28",
-      "fastwam_action_L0",
-      "fastwam_action_L1",
-      "fastwam_action_L2",
-      "fastwam_action_L3",
-      "fastwam_action_L4",
-      "fastwam_action_L5",
-      "fastwam_action_L6",
-      "fastwam_action_L7",
-      "fastwam_action_L8",
-      "fastwam_action_L9",
-      "fastwam_action_L10",
-      "fastwam_action_L11",
-      "fastwam_action_L12",
-      "fastwam_action_L13",
-      "fastwam_action_L14",
-      "fastwam_action_L15",
-      "fastwam_action_L16",
-      "fastwam_action_L17",
-      "fastwam_action_L18",
-      "fastwam_action_L19",
-      "fastwam_action_L20",
-      "fastwam_action_L21",
-      "fastwam_action_L22",
-      "fastwam_action_L23",
-      "fastwam_action_L24",
-      "fastwam_action_L25",
-      "fastwam_action_L26",
-      "fastwam_action_L27",
-      "fastwam_action_L28",
-      "fastwam_action_L29"
+      "fastwam_video_L28"
     ],
     "action_capture": "first_denoising_call"
   },
@@ -76,7 +45,6 @@
   },
   "steering": {
     "layers": [
-      "fastwam_video_L26",
       "fastwam_video_L27",
       "fastwam_video_L28"
     ],

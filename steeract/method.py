@@ -156,10 +156,8 @@ class Controller:
         self.support_gate = Gate(cfg.support_open, cfg.support_close)
         self.failure_gate = Gate(cfg.failure_open, cfg.failure_close)
 
-    def step(self, intensity, gain, *, predict_intensity=None):
+    def observe(self, intensity):
         cfg = self.settings
-        if cfg.response_model == 'measured' and predict_intensity is None:
-            raise ValueError('measured response requires a candidate intensity predictor')
         self.history.append(float(intensity))
         prefix_ready = True
         if cfg.reference_mode == 'prefix':
@@ -174,8 +172,14 @@ class Controller:
         mass = self.bank.support(vector, counts, cfg, self.rng)
         windows = counts.sum(1) >= cfg.min_windows
         ready = windows.any() if cfg.reference_mode == 'prefix' else windows.all()
+        return mass, ready, prefix_ready, self.bank.distance(vector), self.bank.distance(vector, 'failure')
+
+    def step(self, intensity, gain, *, predict_intensity=None):
+        cfg = self.settings
+        if cfg.response_model == 'measured' and predict_intensity is None:
+            raise ValueError('measured response requires a candidate intensity predictor')
+        mass, ready, prefix_ready, ds, df = self.observe(intensity)
         self.support_gate.update(prefix_ready and mass >= cfg.support_mass and ready)
-        ds, df = self.bank.distance(vector), self.bank.distance(vector, "failure")
         if self.support_gate.is_open:
             self.failure_gate.update(df < ds)
         else:

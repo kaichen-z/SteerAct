@@ -1,22 +1,29 @@
 import fcntl
 import json
 from contextlib import ExitStack
+from functools import partial
 from pathlib import Path
 
 import torch
 
 from .config import collection_identity, digest, sae_artifact_dir, steering_layers
 from .method import Controller, ReferenceBank, Settings
-from .data import atomic_json, token_indices
+from .data import atomic_json, records, token_indices
+from . import ranking
 from .ranking import file_hash
 from .runtime import DecisionHook, LastCallHook, load_backend
 from .sae import load_sae
-from .trajectory import TrajectoryBank, TrajectoryController, TrajectorySettings
-from .phase_alignment import AlignedTrajectoryBank, AlignedTrajectoryController, AlignmentSettings
+from .trajectory import TrajectoryBank, TrajectoryController
+from .phase_alignment import AlignedTrajectoryBank, AlignedTrajectoryController
+from .temporal import EpisodeGate, TemporalController, TemporalTarget
+
+
+class _RolloutInterrupted(Exception):
+    pass
 
 
 def steering_hook(sae, group, settings, token_limit, seed, trajectory_settings=None, alignment_settings=None,
-                  last_call_count=None):
+                  last_call_count=None, *, temporal_target=None, editing=False, after_feedback=None):
     if alignment_settings is not None and trajectory_settings is None:
         raise ValueError('phase alignment requires trajectory settings')
     ids = group['feature_ids']
@@ -30,8 +37,9 @@ def steering_hook(sae, group, settings, token_limit, seed, trajectory_settings=N
         bank = ReferenceBank(group['success'], group['failure'], settings)
         prefix_banks = {int(key): ReferenceBank(value['success'], value['failure'], settings)
                         for key, value in group.get('prefix_banks', {}).items()}
-        controller = Controller(bank, settings=settings, scale=group['intensity_scale'], seed=seed,
-                                prefix_banks=prefix_banks)
+        options = dict(settings=settings, scale=group['intensity_scale'], seed=seed, prefix_banks=prefix_banks)
+        controller = (Controller(bank, **options) if temporal_target is None else
+                      TemporalController(bank, target=temporal_target, editing=editing, **options))
     elif alignment_settings is None:
         bank = TrajectoryBank(group['trajectory_success'], group['trajectory_failure'],
                               scale=group['intensity_scale'], settings=trajectory_settings)
@@ -59,12 +67,13 @@ def steering_hook(sae, group, settings, token_limit, seed, trajectory_settings=N
         intensity, gain = measure(rows)
         alpha = controller.step(intensity, gain,
             predict_intensity=lambda a: intensity if a == 0 else measure(rows + a * direction.to(hidden))[0])
-        if alpha == 0:
-            controller.feedback(intensity)
-            return hidden
-        edited = hidden.clone()
-        edited[0, indices] = rows + alpha * direction.to(hidden)
-        controller.feedback(measure(edited[0, indices])[0])
+        edited = hidden
+        if alpha:
+            edited = hidden.clone()
+            edited[0, indices] = rows + alpha * direction.to(hidden)
+        controller.feedback(measure(edited[0, indices])[0] if alpha else intensity)
+        if after_feedback is not None:
+            after_feedback(controller)
         return edited
 
     if last_call_count is not None:
@@ -92,27 +101,25 @@ def load_layer(cfg, device, layer, task, bank, control):
         raise ValueError('steering.selector changed; rerun rank')
     if Settings(**bank['control_settings']).to_dict() != control.to_dict():
         raise ValueError('controller settings changed; rerun rank')
-    method = bank.get('method', 'ordinal')
-    if method not in ('ordinal', 'trajectory', 'phase_aligned'):
-        raise ValueError('unknown steering bank method')
-    trajectory_control = None
-    if method in ('trajectory', 'phase_aligned'):
-        trajectory_control = TrajectorySettings(**cfg['steering']['trajectory'])
-        if trajectory_control != TrajectorySettings(**bank['trajectory_settings']):
-            raise ValueError('trajectory settings changed; rebuild bank')
-    elif 'trajectory' in cfg['steering']:
-        raise ValueError('trajectory config requires a trajectory bank')
-    alignment_control = None
-    if method == 'phase_aligned':
-        alignment_control = AlignmentSettings(**cfg['steering']['alignment'])
-        if alignment_control != AlignmentSettings(**bank['alignment_settings']):
-            raise ValueError('alignment settings changed; rebuild bank')
-    elif 'alignment' in cfg['steering']:
-        raise ValueError('alignment config requires a phase-aligned bank')
     sae, checkpoint = load_sae(path, device)
     if checkpoint['tasks'] != [task]:
         raise ValueError(f'{task} {layer}: SAE training task mismatch')
-    return sae, trajectory_control, alignment_control
+    return sae
+
+
+def validate_steering(cfg, layer_banks, control):
+    if (control.reference_mode != 'episode' or control.response_model != 'linear'
+            or 'trajectory' in cfg['steering'] or 'alignment' in cfg['steering']
+            or any(bank.get('method', 'ordinal') != 'ordinal' for bank in layer_banks.values())):
+        raise ValueError('SteerAct evaluation requires an episode reference bank and linear response')
+
+
+def evaluation_identity(cfg, checkpoints, bank, layer_banks, control, variant):
+    identity = digest(dict(config=cfg, checkpoint=checkpoints, bank=bank))
+    if variant == 'base':
+        return identity
+    validate_steering(cfg, layer_banks, control)
+    return digest(dict(configuration_identity=identity, rollout_schema=4))
 
 
 def infer(cfg, device):
@@ -148,7 +155,7 @@ def infer(cfg, device):
     else:
         checkpoints = bank['checkpoint_sha256']
     control = Settings(**cfg['steering']['controller'])
-    identity = digest(dict(config=cfg, checkpoint=checkpoints, bank=bank))
+    identity = evaluation_identity(cfg, checkpoints, bank, layer_banks, control, variant)
     source_range = range(cfg['collection']['seed_start'],
                          cfg['collection']['seed_start'] + cfg['collection']['max_attempts'])
     evaluation_range = range(settings['seed_start'], settings['seed_start'] + settings['max_attempts'])
@@ -188,6 +195,36 @@ def infer(cfg, device):
         evaluate(cfg, device, layer_banks, control, evaluation_range, outputs)
 
 
+def load_temporal_target(cfg, device, layer, task, group, sae):
+    root, rows = records(cfg, layer=layer)
+    by_seed = {row['seed']: row for row in rows if row['task'] == task}
+    seeds = group['source_seeds']
+    if len(set(seeds)) != len(seeds) or not set(seeds).issubset(by_seed):
+        raise ValueError(f'{task} {layer}: steering bank reference seeds differ from collected episodes')
+    success = [by_seed[seed] for seed in seeds if by_seed[seed]['success']]
+    failure = [by_seed[seed] for seed in seeds if not by_seed[seed]['success']]
+    if len(success) != len(group['success']) or len(failure) != len(group['failure']):
+        raise ValueError(f'{task} {layer}: steering bank outcomes differ from collected episodes')
+    horizon = min(max(row['num_decisions'] for row in outcome) for outcome in (success, failure))
+    histories = []
+    for row in success:
+        intensities = ranking.episode_intensities(sae, root, row, device, cfg['sae']['batch_size'])
+        histories.append((row['seed'], intensities[:, group['feature_ids']].mean(1).tolist()))
+    return TemporalTarget(histories, horizon)
+
+
+def run_episode(backend, task, seed, make_hooks):
+    hooks = make_hooks(editing=False)
+    try:
+        result = backend.run_pi05_with_hook(env_seed=seed, task_name=task, hooks=hooks)
+    except _RolloutInterrupted:
+        hooks = make_hooks(editing=True)
+        result = backend.run_pi05_with_hook(env_seed=seed, task_name=task, hooks=hooks)
+    if any(hook.decisions != result['num_decisions'] for _, hook in hooks):
+        raise RuntimeError('decision cadence mismatch')
+    return result, hooks
+
+
 def evaluate(cfg, device, layer_banks, control, evaluation_range, outputs):
     settings = cfg['evaluation']
     budget = settings['episodes_per_task']
@@ -196,6 +233,8 @@ def evaluate(cfg, device, layer_banks, control, evaluation_range, outputs):
     top_k = cfg['steering']['top_k']
     last_call_count = (cfg['policy']['inference_steps']
                        if cfg['collection']['action_capture'] == 'last_denoising_call' else None)
+    if 'steeract' in outputs:
+        validate_steering(cfg, layer_banks, control)
     backend = load_backend(cfg, inference=True)
     for task in cfg['tasks']:
         previous = {variant: [row for row in prior if row['task'] == task]
@@ -203,26 +242,41 @@ def evaluate(cfg, device, layer_banks, control, evaluation_range, outputs):
         used = {variant: {row['seed'] for row in rows} for variant, rows in previous.items()}
         valid = {variant: sum(not row['invalid'] for row in rows) for variant, rows in previous.items()}
         models = {}
-        if 'steeract' in outputs:
+        targets = {}
+        if 'steeract' in outputs and valid['steeract'] < budget:
             models = {layer: load_layer(cfg, device, layer, task, layer_banks[layer], control)
                       for layer in layers}
+            targets = {layer: load_temporal_target(cfg, device, layer, task,
+                                                   layer_banks[layer]['tasks'][task], sae)
+                       for layer, sae in models.items()}
         for seed in evaluation_range:
             if all(count >= budget for count in valid.values()):
                 break
             for variant, (destination, prior) in outputs.items():
                 if valid[variant] >= budget or seed in used[variant]:
                     continue
-                hooks = []
-                if variant == 'steeract':
-                    for layer, (sae, trajectory_control, alignment_control) in models.items():
+                def make_hooks(editing):
+                    gate = EpisodeGate(targets, control) if not editing else None
+
+                    def after_feedback(layer, controller):
+                        if gate.update(layer, controller):
+                            raise _RolloutInterrupted
+
+                    hooks = []
+                    for layer, sae in models.items():
                         group = layer_banks[layer]['tasks'][task]
                         hook = steering_hook(sae, group, control, cfg['collection']['tokens_per_decision'],
-                                             seed, trajectory_settings=trajectory_control,
-                                             alignment_settings=alignment_control, last_call_count=last_call_count)
+                                             seed, last_call_count=last_call_count,
+                                             temporal_target=targets[layer], editing=editing,
+                                             after_feedback=partial(after_feedback, layer) if gate is not None else None)
                         hooks.append((layer, hook))
-                result = backend.run_pi05_with_hook(env_seed=seed, task_name=task, hooks=hooks)
-                if any(hook.decisions != result['num_decisions'] for _, hook in hooks):
-                    raise RuntimeError('decision cadence mismatch')
+                    return hooks
+
+                if variant == 'steeract':
+                    result, hooks = run_episode(backend, task, seed, make_hooks)
+                else:
+                    hooks = []
+                    result = backend.run_pi05_with_hook(env_seed=seed, task_name=task, hooks=hooks)
                 row = dict(task=task, seed=seed, success=bool(result['success']),
                            invalid=bool(result.get('invalid_rollout_flag', False)),
                            invalid_reason=result.get('invalid_reason'),
