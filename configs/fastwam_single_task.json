@@ -1,6 +1,6 @@
 {
   "backbone": "fastwam",
-  "layer": "fastwam_video_L29",
+  "layer": "fastwam_video_L28",
   "tasks": [
     "put_bottles_dustbin"
   ],
@@ -28,9 +28,9 @@
     "tokens_per_decision": 256,
     "storage_dtype": "float32",
     "layers": [
+      "fastwam_video_L26",
       "fastwam_video_L27",
       "fastwam_video_L28",
-      "fastwam_video_L29",
       "fastwam_action_L0",
       "fastwam_action_L1",
       "fastwam_action_L2",
@@ -75,11 +75,19 @@
     "log_every": 100
   },
   "steering": {
-    "top_k": 4,
-    "controller": {}
+    "layers": [
+      "fastwam_video_L26",
+      "fastwam_video_L27",
+      "fastwam_video_L28"
+    ],
+    "top_k": 1,
+    "selector": "action_response",
+    "controller": {
+      "support_mass": 0.35
+    }
   },
   "evaluation": {
-    "episodes_per_task": 200,
+    "episodes_per_task": 100,
     "seed_start": 5000,
     "max_attempts": 1000,
     "max_steps_multiplier": 2

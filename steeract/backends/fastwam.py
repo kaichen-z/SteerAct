@@ -67,6 +67,7 @@ def _load_policy():
         "mixed_precision": os.environ.get("FASTWAM_MIXED_PRECISION", "bf16"),
         "replan_steps": int(os.environ.get("FASTWAM_REPLAN_STEPS", "24")),
         "num_inference_steps": int(os.environ.get("FASTWAM_INFERENCE_STEPS", "10")),
+        "sigma_shift": float(os.environ.get("FASTWAM_SIGMA_SHIFT", "5.0")),
         "rand_device": "cpu",
         "tiled": False,
         "timing_enabled": True,
@@ -134,8 +135,9 @@ def run_pi05_with_hook(
     layer: str | None = None,
     *,
     hooks: list[tuple[str, Any]] | None = None,
+    action_probe=None,
     **_: Any,
-) -> dict[str, Any]:
+) -> dict[str, Any] | list[dict]:
     if task_name is None and task_id is not None:
         try:
             order = (COAST_ROBOTWIN_TASK_ORDER if os.environ.get("FASTWAM_COAST_TASKS") == "1"
@@ -151,6 +153,7 @@ def run_pi05_with_hook(
         hooks = [(layer, hook)]
 
     from eval_policy_xpolicylab import class_decorator, load_task_args, is_episode_end
+    from envs.utils.create_actor import UnStableError
 
     policy = _load_policy()
     import random
@@ -184,6 +187,7 @@ def run_pi05_with_hook(
     steps = 0
     success = False
     invalid = False
+    invalid_reason = None
     decision_inference_ms = []
     try:
         usr = {
@@ -207,6 +211,9 @@ def run_pi05_with_hook(
         max_steps = apply_step_limit(task_env)
         task_env.set_instruction(instruction=task_name)
         policy.reset()
+        if action_probe is not None:
+            observation = task_env.get_obs()
+            return action_probe(lambda: policy._infer_action_chunk(observation, task_env.get_instruction()))
         if video_path:
             import imageio.v2 as imageio
             Path(video_path).parent.mkdir(parents=True, exist_ok=True)
@@ -244,6 +251,12 @@ def run_pi05_with_hook(
             if bool(getattr(task_env, "eval_success", False)):
                 break
         success = bool(getattr(task_env, "eval_success", False))
+    except UnStableError:
+        if steps or action_probe is not None:
+            raise
+        invalid = True
+        invalid_reason = 'environment_unstable_before_policy'
+        max_steps = None
     except Exception:
         invalid = True
         raise
@@ -273,6 +286,7 @@ def run_pi05_with_hook(
         "max_steps": max_steps,
         "task_name": task_name,
         "invalid_rollout_flag": invalid or steps <= 0,
+        "invalid_reason": invalid_reason,
         "decision_inference_ms": decision_inference_ms,
         "num_decisions": len(decision_inference_ms),
         "mean_decision_inference_ms": (float(np.mean(decision_inference_ms))

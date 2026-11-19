@@ -119,8 +119,9 @@ def run_pi05_with_hook(
     layer: str | None = None,
     *,
     hooks: list[tuple[str, Any]] | None = None,
+    action_probe=None,
     **_: Any,
-) -> dict[str, Any]:
+) -> dict[str, Any] | list[dict]:
     if task_name is None and task_id is not None:
         try:
             order = (COAST_ROBOTWIN_TASK_ORDER if os.environ.get("ROBOTWIN_COAST_TASKS") == "1"
@@ -190,7 +191,7 @@ def run_pi05_with_hook(
         eval_step_limit = os.environ.get("ROBOTWIN_EVAL_STEP_LIMIT")
         if eval_step_limit:
             task_env.step_lim = int(eval_step_limit)
-        if video_dir:
+        if video_dir and action_probe is None:
             initial_obs = task_env.get_obs()
             frame = initial_obs["observation"]["head_camera"]["rgb"]
             height, width = np.asarray(frame).shape[:2]
@@ -260,6 +261,8 @@ def run_pi05_with_hook(
                 policy_obs = encode_obs(obs, usr["action_type"], action_dim_info)
             except Exception as exc:
                 raise RuntimeError(f"Pi05 observation encoding failed; keys={list(obs.keys())}") from exc
+            if action_probe is not None:
+                return action_probe(lambda: policy.infer(copy.deepcopy(policy_obs))["actions"])
             if os.environ.get("ROBOTWIN_DEBUG_ONCE") == "1" and steps == 0:
                 st = policy_obs.get("state") if isinstance(policy_obs, dict) else None
                 if st is not None:
@@ -308,7 +311,7 @@ def run_pi05_with_hook(
             handle.remove()
         if task_env is not None:
             try:
-                if video_dir and hasattr(task_env, "eval_video_ffmpeg"):
+                if video_dir and action_probe is None and hasattr(task_env, "eval_video_ffmpeg"):
                     task_env._del_eval_video_ffmpeg()
                 task_env.close_env(clear_cache=True)
             except Exception:

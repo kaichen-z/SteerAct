@@ -1,11 +1,8 @@
-from pathlib import Path
-import json
-
 import numpy as np
 import torch
 from torch import nn
 
-from .config import collection_identity, digest
+from .config import collection_identity, digest, sae_artifact_dir, steering_layers
 from .data import ActivationRows, atomic_json, records
 
 
@@ -46,14 +43,29 @@ def load_sae(path, device='cpu'):
 
 
 def train(cfg, device):
-    root, episodes = records(cfg)
+    paths = {}
+    for layer in steering_layers(cfg):
+        root, rows = records(cfg, layer=layer)
+        task_paths = {}
+        for task in cfg['tasks']:
+            episodes = [row for row in rows if row['task'] == task]
+            task_paths[task] = train_task(cfg, device, layer, task, root, episodes)
+        paths[layer] = task_paths if len(task_paths) > 1 else next(iter(task_paths.values()))
+    return paths if len(paths) > 1 else next(iter(paths.values()))
+
+
+def train_task(cfg, device, layer, task, root, episodes):
     options = cfg['sae']
     for key in ('steps', 'batch_size', 'expansion_ratio', 'top_k'):
         if options[key] < 1:
             raise ValueError(f'sae.{key} must be positive')
     if options['learning_rate'] <= 0:
         raise ValueError('learning_rate must be positive')
-    data = ActivationRows(root, episodes)
+    cache_device = options.get('cache_device')
+    if cache_device == 'training':
+        cache_device = device
+    data = ActivationRows(root, episodes, cache_device=cache_device,
+                          max_cache_gb=options.get('max_cache_gb', 16))
     torch.manual_seed(options['seed'])
     rng = np.random.default_rng(options['seed'])
     dictionary = data.dimension * options['expansion_ratio']
@@ -61,7 +73,7 @@ def train(cfg, device):
     with torch.no_grad():
         model.b_dec.copy_(data.batch(options['batch_size'], rng).mean(0).to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=options['learning_rate'])
-    output = Path(cfg['paths']['run_dir']) / 'sae'
+    output = sae_artifact_dir(cfg, layer, task)
     output.mkdir(parents=True, exist_ok=True)
     losses = []
     model.train()
@@ -84,8 +96,8 @@ def train(cfg, device):
     checkpoint = dict(schema='steeract.sae.v1',
                       config=dict(hidden_dim=data.dimension, dict_size=dictionary, k=options['top_k']),
                       state_dict={k: v.detach().cpu() for k, v in model.state_dict().items()},
-                      collection_identity=digest(collection_identity(cfg)), training=options,
-                      tasks=cfg['tasks'], source_episodes=[dict(task=r['task'], seed=r['seed']) for r in episodes])
+                      collection_identity=digest(collection_identity(cfg, layer=layer)), training=options,
+                      tasks=[task], source_episodes=[dict(task=r['task'], seed=r['seed']) for r in episodes])
     temp = output / 'model.tmp.pt'
     torch.save(checkpoint, temp)
     temp.replace(output / 'model.pt')

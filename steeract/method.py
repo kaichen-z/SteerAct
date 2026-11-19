@@ -46,6 +46,8 @@ def energy_score(success, failure):
 
 @dataclass(frozen=True)
 class Settings:
+    response_model: str = 'linear'
+    reference_mode: str = 'episode'
     posterior_samples: int = 500
     support_mass: float = 0.65
     alpha_max: float = 10.0
@@ -61,6 +63,10 @@ class Settings:
     min_effective_gain: float = 1e-3
 
     def __post_init__(self):
+        if self.reference_mode not in ('episode', 'prefix'):
+            raise ValueError('reference_mode must be episode or prefix')
+        if self.response_model not in ('linear', 'measured'):
+            raise ValueError('response_model must be linear or measured')
         for name in ("posterior_samples", "support_k", "outcome_k", "min_windows",
                      "support_open", "support_close", "failure_open", "failure_close"):
             value = getattr(self, name)
@@ -107,6 +113,8 @@ class ReferenceBank:
     def support(self, vector, counts, settings, rng):
         samples = np.tile(vector, (settings.posterior_samples, 1))
         for block in range(2):
+            if settings.reference_mode == 'prefix' and counts[block].sum() == 0:
+                continue
             p = rng.dirichlet(counts[block] + 0.5, settings.posterior_samples)
             samples[:, block * 9:block * 9 + 6] = p
             samples[:, block * 9 + 6] = entropy(p)
@@ -133,9 +141,12 @@ class Gate:
 
 
 class Controller:
-    def __init__(self, bank, *, scale=1.0, settings=None, seed=0):
+    def __init__(self, bank, *, scale=1.0, settings=None, seed=0, prefix_banks=None):
         self.settings = settings or Settings()
         self.bank, self.scale = bank, scale
+        self.prefix_banks = prefix_banks or {}
+        if self.settings.reference_mode == 'prefix' and not self.prefix_banks:
+            raise ValueError('prefix reference mode requires matched-time banks')
         self.reset(seed)
 
     def reset(self, seed=0):
@@ -145,23 +156,40 @@ class Controller:
         self.support_gate = Gate(cfg.support_open, cfg.support_close)
         self.failure_gate = Gate(cfg.failure_open, cfg.failure_close)
 
-    def step(self, intensity, gain):
+    def step(self, intensity, gain, *, predict_intensity=None):
         cfg = self.settings
+        if cfg.response_model == 'measured' and predict_intensity is None:
+            raise ValueError('measured response requires a candidate intensity predictor')
         self.history.append(float(intensity))
+        prefix_ready = True
+        if cfg.reference_mode == 'prefix':
+            matched = self.prefix_banks.get(len(self.history))
+            prefix_ready = matched is not None
+            if prefix_ready:
+                self.bank = matched
+            else:
+                self.support_gate.reset()
+                self.failure_gate.reset()
         vector, counts = descriptor(self.history, self.scale)
         mass = self.bank.support(vector, counts, cfg, self.rng)
-        self.support_gate.update(mass >= cfg.support_mass and (counts.sum(1) >= cfg.min_windows).all())
+        windows = counts.sum(1) >= cfg.min_windows
+        ready = windows.any() if cfg.reference_mode == 'prefix' else windows.all()
+        self.support_gate.update(prefix_ready and mass >= cfg.support_mass and ready)
         ds, df = self.bank.distance(vector), self.bank.distance(vector, "failure")
         if self.support_gate.is_open:
             self.failure_gate.update(df < ds)
         else:
             self.failure_gate.reset()
         alpha, best = 0.0, ds
-        if self.support_gate.is_open and self.failure_gate.is_open and np.isfinite(gain) and abs(gain) >= cfg.min_effective_gain:
+        usable = cfg.response_model == 'measured' or (np.isfinite(gain) and abs(gain) >= cfg.min_effective_gain)
+        if self.support_gate.is_open and self.failure_gate.is_open and usable:
             half = int(round(cfg.alpha_max / cfg.alpha_step))
             grid = sorted(np.arange(-half, half + 1) * cfg.alpha_step, key=lambda a: (abs(a), a))
             for candidate in grid:
-                predicted = max(0.0, intensity + candidate * gain)
+                predicted = (float(predict_intensity(float(candidate))) if cfg.response_model == 'measured'
+                             else max(0.0, intensity + candidate * gain))
+                if not np.isfinite(predicted) or predicted < 0:
+                    raise ValueError('candidate intensity must be finite and nonnegative')
                 candidate_vector, _ = descriptor([*self.history[:-1], predicted], self.scale)
                 distance = self.bank.distance(candidate_vector)
                 if distance < best:
@@ -170,6 +198,8 @@ class Controller:
                                support_open=self.support_gate.is_open, failure_open=self.failure_gate.is_open,
                                d_success=ds, d_failure=df, alpha=alpha, predicted_progress=ds-best,
                                intensity_before=float(intensity), effective_gain=float(gain)))
+        if cfg.reference_mode == 'prefix':
+            self.trace[-1]['matched_prefix'] = len(self.history) if prefix_ready else None
         return alpha
 
     def feedback(self, intensity):
@@ -177,6 +207,9 @@ class Controller:
             raise ValueError("feedback requires a decision and a finite nonnegative intensity")
         self.history[-1] = float(intensity)
         self.trace[-1]["intensity_after"] = float(intensity)
+        if self.settings.response_model == 'measured':
+            measured_distance = self.bank.distance(descriptor(self.history, self.scale)[0])
+            self.trace[-1]['measured_progress'] = self.trace[-1]['d_success'] - measured_distance
 
 
 def make_hook(sae, group, settings=None, seed=0):
@@ -206,7 +239,8 @@ def make_hook(sae, group, settings=None, seed=0):
         if hidden.numel() == 0 or not torch.isfinite(hidden).all():
             raise ValueError("empty or nonfinite hidden state")
         intensity, active_fraction = measure(hidden)
-        alpha = controller.step(intensity, active_fraction * self_gain)
+        alpha = controller.step(intensity, active_fraction * self_gain,
+                                predict_intensity=lambda a: measure(hidden + a * direction.to(hidden))[0])
         edited = hidden if alpha == 0 else hidden + alpha * direction.to(hidden)
         after = intensity if alpha == 0 else measure(edited)[0]
         controller.feedback(after)

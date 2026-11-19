@@ -59,6 +59,7 @@ def load_backend(cfg, *, inference=False):
             'FASTWAM_CKPT': paths['checkpoint'], 'FASTWAM_DATASET_STATS': paths['stats'],
             'FASTWAM_TASK_CONFIG': policy['setting'], 'FASTWAM_REPLAN_STEPS': str(policy['replan_steps']),
             'FASTWAM_INFERENCE_STEPS': str(policy['inference_steps']),
+            'FASTWAM_SIGMA_SHIFT': str(policy.get('sigma_shift', 5.0)),
             'DIFFSYNTH_DIT_PATH': assets['dit'], 'DIFFSYNTH_VAE_PATH': assets['vae'],
             'DIFFSYNTH_TEXT_ENCODER_PATH': assets['text_encoder'],
             'DIFFSYNTH_TOKENIZER_PATH': assets['tokenizer'],
@@ -93,6 +94,31 @@ class DecisionHook:
             raise RuntimeError('context activation missing at robot decision')
         self.active = False
         self.decisions += 1
+
+
+class LastCallHook(DecisionHook):
+
+    def __init__(self, callback, expected_calls):
+        if type(expected_calls) is not int or expected_calls < 1:
+            raise ValueError('expected_calls must be a positive integer')
+        super().__init__(callback)
+        self.expected_calls = expected_calls
+        self.completed_call_counts = []
+
+    def __call__(self, module, inputs, hidden):
+        if not self.active or self.calls >= self.expected_calls:
+            raise RuntimeError('unexpected denoising call')
+        self.calls += 1
+        if self.calls != self.expected_calls:
+            return hidden
+        return self.callback(module, inputs, hidden)
+
+    def end_decision(self):
+        if not self.active or self.calls != self.expected_calls:
+            raise RuntimeError('denoising call count differs from declared last call')
+        self.active = False
+        self.decisions += 1
+        self.completed_call_counts.append(self.calls)
 
 
 def apply_step_limit(task_env, configured_max=None):

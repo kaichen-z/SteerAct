@@ -7,7 +7,7 @@ import numpy as np
 import torch
 
 from .config import collection_identity, digest
-from .runtime import DecisionHook, load_backend
+from .runtime import DecisionHook, LastCallHook, load_backend
 
 
 def token_indices(hidden, limit):
@@ -25,7 +25,7 @@ def atomic_json(path, value):
     temp.replace(path)
 
 
-def records(cfg, *, require_budget=True):
+def records(cfg, *, require_budget=True, layer=None):
     root = Path(cfg['paths']['run_dir']) / 'activations'
     manifest = root / 'manifest.json'
     payload = json.loads(manifest.read_text())
@@ -46,12 +46,15 @@ def records(cfg, *, require_budget=True):
             raise ValueError('empty activation decision')
         if set(row.get('layers', {})) != set(cfg['collection']['layers']):
             raise ValueError('manifest does not contain the configured collection layers')
-        for layer, shards in row['layers'].items():
+        for captured_layer, shards in row['layers'].items():
             if (len(shards['files']) != row['num_decisions']
                     or len(shards['counts']) != row['num_decisions']
                     or any(n <= 0 for n in shards['counts'])):
-                raise ValueError(f'{layer}: invalid per-decision shards')
+                raise ValueError(f'{captured_layer}: invalid per-decision shards')
         selected = row['layers'][cfg['layer']]
+        if cfg['collection']['action_capture'] == 'last_denoising_call':
+            if row.get('denoising_call_counts') != [cfg['policy']['inference_steps']] * row['num_decisions']:
+                raise ValueError('last-call capture lacks verified denoising counts')
         if row['files'] != selected['files'] or row['counts'] != selected['counts']:
             raise ValueError('selected layer does not match episode shards')
     if require_budget:
@@ -59,25 +62,42 @@ def records(cfg, *, require_budget=True):
             count = sum(row['task'] == task for row in rows)
             if count != cfg['collection']['episodes_per_task']:
                 raise ValueError(f'{task}: expected {cfg["collection"]["episodes_per_task"]} episodes, found {count}')
+    if layer is not None and layer != cfg['layer']:
+        if layer not in cfg['collection']['layers']:
+            raise ValueError(f'{layer}: layer was not collected')
+        rows = [{**row, **row['layers'][layer]} for row in rows]
     return root, rows
 
 
-def collect(cfg):
+def collect(cfg, *, seeds_by_task=None, backend=None, verify_episode=None):
     root = Path(cfg['paths']['run_dir']) / 'activations'
     root.mkdir(parents=True, exist_ok=True)
+    attempt_log = root / 'attempts.jsonl'
+    if attempt_log.exists() and attempt_log.stat().st_nlink > 1:
+        private = root / 'attempts.private.tmp'
+        shutil.copy2(attempt_log, private)
+        private.replace(attempt_log)
     manifest = root / 'manifest.json'
     identity = digest(collection_identity(cfg))
     if manifest.exists():
         _, rows = records(cfg, require_budget=False)
     else:
         rows = []
-    backend = load_backend(cfg)
+    if backend is None:
+        backend = load_backend(cfg)
     backend.validate_collection_layers()
     settings = cfg['collection']
     for task in cfg['tasks']:
         existing = [row for row in rows if row['task'] == task]
         used = {row['seed'] for row in existing}
-        for seed in range(settings['seed_start'], settings['seed_start'] + settings['max_attempts']):
+        attempts = root / 'attempts.jsonl'
+        if attempts.exists():
+            used.update(row['seed'] for row in map(json.loads, attempts.read_text().splitlines())
+                        if row.get('task') == task and
+                        row.get('invalid_reason') == 'environment_unstable_before_policy')
+        candidates = (seeds_by_task[task] if seeds_by_task is not None else
+                      range(settings['seed_start'], settings['seed_start'] + settings['max_attempts']))
+        for seed in candidates:
             if len(existing) >= settings['episodes_per_task']:
                 break
             if seed in used:
@@ -98,13 +118,23 @@ def collect(cfg):
                     shards['counts'].append(len(selected))
                     return hidden
                 action_layer = name.startswith(('expert_L', 'fastwam_action_L'))
+                if settings['action_capture'] == 'last_denoising_call':
+                    return LastCallHook(capture, cfg['policy']['inference_steps'])
                 return DecisionHook(capture, first_call_only=action_layer)
             hooks = [(name, make_hook(name)) for name in settings['layers']]
             try:
                 result = backend.run_pi05_with_hook(env_seed=seed, task_name=task, hooks=hooks)
+                if (result.get('invalid_rollout_flag') and
+                        result.get('invalid_reason') == 'environment_unstable_before_policy'):
+                    with attempts.open('a') as output:
+                        output.write(json.dumps(dict(task=task, seed=seed,
+                            invalid_reason=result['invalid_reason'])) + '\n')
+                    print(f'{task}: seed={seed}, invalid scene before policy; recorded and skipped', flush=True)
+                    continue
                 decisions = result['num_decisions']
-                if result.get('invalid_rollout_flag') or decisions < 5:
-                    raise ValueError('invalid rollout or fewer than five robot decisions')
+                minimum = settings.get('min_decisions', 5)
+                if result.get('invalid_rollout_flag') or decisions < minimum:
+                    raise ValueError(f'invalid rollout or fewer than {minimum} robot decisions')
                 if any(hook.decisions != decisions for _, hook in hooks):
                     raise ValueError('backend decision count mismatch')
                 destination = root / task / f'{seed:08d}'
@@ -118,6 +148,10 @@ def collect(cfg):
                 row = dict(task=task, seed=seed, success=bool(result['success']),
                            num_decisions=decisions, counts=selected['counts'],
                            files=selected['files'], layers=layer_shards)
+                if settings['action_capture'] == 'last_denoising_call':
+                    row['denoising_call_counts'] = hooks[0][1].completed_call_counts
+                if verify_episode is not None:
+                    verify_episode(row)
                 rows.append(row)
                 existing.append(row)
                 atomic_json(manifest, dict(schema='steeract.activations.v2', identity=identity,
@@ -135,7 +169,7 @@ def collect(cfg):
 
 
 class ActivationRows:
-    def __init__(self, root, episodes):
+    def __init__(self, root, episodes, *, cache_device=None, max_cache_gb=16):
         self.root = Path(root)
         self.files = [f for ep in episodes for f in ep['files']]
         counts = [n for ep in episodes for n in ep['counts']]
@@ -143,6 +177,17 @@ class ActivationRows:
         if not len(self.ends):
             raise ValueError('empty activation dataset')
         self.dimension = self.shard(0).shape[1]
+        self.cached = None
+        if cache_device is not None:
+            required = int(self.ends[-1]) * self.dimension * 4
+            if required > max_cache_gb * 1024**3:
+                raise ValueError(f'activation cache needs {required / 1024**3:.2f} GiB; '
+                                 f'limit is {max_cache_gb} GiB')
+            self.cached = torch.empty((int(self.ends[-1]), self.dimension),
+                                      dtype=torch.float32, device=cache_device)
+            for index in range(len(self.files)):
+                start = int(self.ends[index - 1]) if index else 0
+                self.cached[start:int(self.ends[index])].copy_(self.shard(index))
 
     def shard(self, index):
         value = torch.load(self.root / self.files[index], map_location='cpu', mmap=True, weights_only=True)
@@ -155,6 +200,8 @@ class ActivationRows:
 
     def batch(self, size, rng):
         ids = rng.integers(0, self.ends[-1], size=size)
+        if self.cached is not None:
+            return self.cached[torch.as_tensor(ids, device=self.cached.device)]
         shards = np.searchsorted(self.ends, ids, side='right')
         output = torch.empty((size, self.dimension), dtype=torch.float32)
         for index in np.unique(shards):

@@ -61,11 +61,14 @@
     "log_every": 100
   },
   "steering": {
-    "top_k": 4,
-    "controller": {}
+    "top_k": 1,
+    "selector": "action_response",
+    "controller": {
+      "support_mass": 0.35
+    }
   },
   "evaluation": {
-    "episodes_per_task": 200,
+    "episodes_per_task": 100,
     "seed_start": 5000,
     "max_attempts": 1000,
     "max_steps_multiplier": 2
